@@ -3,6 +3,7 @@ import './App.css';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const JOB_ENDPOINT = `${API_BASE_URL}/api/job`;
+const TECH_STACKS_ENDPOINT = `${API_BASE_URL}/api/tech-stacks`;
 
 const buildJobFetchUrl = (sourceLink) => {
   const encoded = encodeURIComponent(sourceLink.trim());
@@ -32,6 +33,9 @@ function App() {
   const [error, setError] = useState('');
   const [linkInput, setLinkInput] = useState('');
   const [skippedLinks, setSkippedLinks] = useState([]);
+  const [isTechModalOpen, setIsTechModalOpen] = useState(false);
+  const [savedTechStacks, setSavedTechStacks] = useState([]);
+  const [techModalInput, setTechModalInput] = useState('');
   const isLoading = status === 'loading';
   const hasError = status === 'error';
 
@@ -70,9 +74,67 @@ function App() {
   );
   const readyLinkCount = fetchableLinks.length;
 
+  const savedTechStackSet = useMemo(
+    () => new Set(savedTechStacks.map((entry) => entry.toLowerCase())),
+    [savedTechStacks]
+  );
+
   useEffect(() => {
     setSkippedLinks([]);
   }, [linkInput]);
+
+  useEffect(() => {
+    const loadTechStacks = async () => {
+      if (!TECH_STACKS_ENDPOINT) return;
+      try {
+        const response = await fetch(TECH_STACKS_ENDPOINT);
+        if (!response.ok) {
+          throw new Error('Failed to load tech stacks from server.');
+        }
+        const data = await response.json();
+        const stacks = Array.isArray(data.techStacks) ? data.techStacks : [];
+        setSavedTechStacks(stacks);
+        setTechModalInput(stacks.join('\n'));
+      } catch {
+        // If the server is unavailable, leave the modal empty so the user can start fresh.
+      }
+    };
+
+    loadTechStacks();
+  }, []);
+
+  const handleSaveTechStacks = useCallback(async () => {
+    const entries = techModalInput
+      .split(/[\n,]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    const unique = Array.from(new Set(entries));
+    setSavedTechStacks(unique);
+
+    if (TECH_STACKS_ENDPOINT && unique.length > 0) {
+      try {
+        const response = await fetch(TECH_STACKS_ENDPOINT, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ techStacks: unique }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const stacks = Array.isArray(data.techStacks) ? data.techStacks : unique;
+          setSavedTechStacks(stacks);
+          setTechModalInput(stacks.join('\n'));
+        }
+      } catch {
+        // If saving fails, we still keep the local state so the UI reflects the user's input.
+      }
+    }
+
+    setIsTechModalOpen(false);
+  }, [techModalInput]);
 
   const handleFetchLinks = useCallback(
     async () => {
@@ -136,7 +198,50 @@ function App() {
             Paste multiple openings, fetch them, and scan the highlights in one glance.
           </p>
         </div>
+        <button type="button" onClick={() => setIsTechModalOpen(true)}>
+          Tech stack preferences
+        </button>
       </header>
+
+      {savedTechStacks.length > 0 && (
+        <p className="helper-text saved-tech-summary">
+          Tracking {savedTechStacks.length} tech stack
+          {savedTechStacks.length === 1 ? '' : 's'}:{' '}
+          {savedTechStacks.join(', ')}
+        </p>
+      )}
+
+      {isTechModalOpen && (
+        <div className="tech-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="tech-modal">
+            <div className="tech-modal-header">
+              <p className="eyebrow">Tech stacks</p>
+              <h2>Tell us what you work with</h2>
+              <p className="helper-text">
+                Add each technology on a new line or separate them with commas. We&apos;ll
+                highlight any matches we find in job descriptions.
+              </p>
+            </div>
+            <textarea
+              value={techModalInput}
+              onChange={(event) => setTechModalInput(event.target.value)}
+              placeholder={'React\nTypeScript\nNode.js'}
+            />
+            <div className="tech-modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setIsTechModalOpen(false)}
+              >
+                Close
+              </button>
+              <button type="button" onClick={handleSaveTechStacks}>
+                Save tech stacks
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="link-collector">
         <div className="link-collector-heading">
@@ -259,15 +364,38 @@ function App() {
 
               <div className="job-tech">
                 <p className="job-field-label">Tech Stacks</p>
+                {savedTechStacks.length > 0 && (
+                  <p className="helper-text job-tech-helper">
+                    {jobEntry.techStacks?.some((tech) =>
+                      savedTechStackSet.has(String(tech).toLowerCase())
+                    )
+                      ? 'We found matches with your saved tech stack.'
+                      : 'No matches with your saved tech stack for this role.'}
+                  </p>
+                )}
                 <div className="chip-row">
                   {(!jobEntry.techStacks || jobEntry.techStacks.length === 0) && (
                     <span className="chip muted">Not listed</span>
                   )}
-                  {jobEntry.techStacks?.map((tech) => (
-                    <span className="chip" key={`${jobEntry.sourceLink}-${tech}`}>
-                      {tech}
-                    </span>
-                  ))}
+                  {jobEntry.techStacks?.map((tech) => {
+                    const isMatch = savedTechStackSet.has(String(tech).toLowerCase());
+                    const hasAnyMatches = jobEntry.techStacks?.some((item) =>
+                      savedTechStackSet.has(String(item).toLowerCase())
+                    );
+                    const classes = [
+                      'chip',
+                      isMatch ? 'match' : '',
+                      hasAnyMatches && !isMatch ? 'dimmed' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ');
+
+                    return (
+                      <span className={classes} key={`${jobEntry.sourceLink}-${tech}`}>
+                        {tech}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             </article>

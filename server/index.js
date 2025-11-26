@@ -1,9 +1,58 @@
 const express = require('express');
 const cors = require('cors');
 const cheerio = require('cheerio');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+const TECH_STACKS_DB_PATH = path.join(__dirname, 'tech_stacks.json');
+
+// Built-in defaults used on first run or if the DB file is missing/corrupt
+const DEFAULT_TECH_STACKS = [
+  'React',
+  'Next.js',
+  'TypeScript',
+  'JavaScript',
+  'Node.js',
+  'Angular',
+  'Vue.js',
+  'Java',
+  'Spring Boot',
+  'Python',
+  'Django',
+  'Flask',
+];
+
+const readTechStacksFromFile = () => {
+  try {
+    const raw = fs.readFileSync(TECH_STACKS_DB_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch (_err) {
+    // If the file does not exist or is malformed, fall through to defaults
+  }
+
+  return DEFAULT_TECH_STACKS;
+};
+
+const writeTechStacksToFile = (stacks) => {
+  try {
+    fs.writeFileSync(TECH_STACKS_DB_PATH, JSON.stringify(stacks, null, 2), 'utf8');
+  } catch (err) {
+    // Failing to persist should not crash the server; log for visibility.
+    console.error('Failed to persist tech stacks DB:', err);
+  }
+};
+
+// In-memory cache of tech stacks used when parsing job descriptions.
+let techStacks = readTechStacksFromFile();
+
+// Utility to escape user-provided labels when building regexes
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const normalizeUrl = (rawUrl) => {
   if (!rawUrl) return null;
@@ -23,7 +72,7 @@ const extractText = (node) => (node ? node.trim() : '');
 
 const pickFirst = (...values) => values.find((value) => !!value && value.length > 0);
 
-const collectKeywords = ($) => {
+const collectKeywords = ($, pageText = '') => {
   const keywords = new Set();
   const metaKeywords = $('meta[name="keywords"]').attr('content');
   if (metaKeywords) {
@@ -38,6 +87,47 @@ const collectKeywords = ($) => {
     const tag = $(element).attr('content');
     if (tag) {
       keywords.add(tag.trim());
+    }
+  });
+
+  // Fall back to scanning the full page text for well-known tech stack names.
+  // Many modern job boards (including Workday-hosted pages) embed the full job
+  // description inside JSON blobs in <script> tags, so we also include all
+  // script contents in the text we scan.
+  const scriptText = $('script')
+    .map((_, element) => $(element).text() || '')
+    .get()
+    .join('\n');
+
+  const rawText = `${pageText || $('body').text()}\n${scriptText}`;
+
+  // Build simple case-insensitive "word-ish" matchers based on the current tech stack DB.
+  techStacks.forEach((label) => {
+    if (!label || typeof label !== 'string') return;
+
+    const normalized = label.trim();
+    if (!normalized) return;
+
+    let patternSource = `\\b${escapeRegex(normalized)}\\b`;
+
+    // Heuristics for common tech variants so that, for example, a saved
+    // "React" stack will still match "ReactJS" or "React.js" in job ads,
+    // and "JavaScript" will also match a bare "JS" mention.
+    if (/^React$/i.test(normalized)) {
+      patternSource = '\\bReact(?:JS|\\.js)?\\b';
+    } else if (/^Node(?:\\.js)?$/i.test(normalized)) {
+      patternSource = '\\bNode(?:\\.js|JS)?\\b';
+    } else if (/^JavaScript$/i.test(normalized)) {
+      patternSource = '\\bJavaScript\\b|\\bJS\\b';
+    } else if (/^TypeScript$/i.test(normalized)) {
+      patternSource = '\\bTypeScript\\b|\\bTS\\b';
+    } else if (/^AWS$/i.test(normalized)) {
+      patternSource = '\\bAWS\\b|\\bAmazon Web Services\\b';
+    }
+
+    const pattern = new RegExp(patternSource, 'i');
+    if (pattern.test(rawText)) {
+      keywords.add(label);
     }
   });
 
@@ -74,9 +164,44 @@ const extractLocationHints = ($) => {
 };
 
 app.use(cors());
+app.use(express.json());
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Tech stacks CRUD (used by the client modal)
+app.get('/api/tech-stacks', (_req, res) => {
+  res.json({ techStacks });
+});
+
+app.put('/api/tech-stacks', (req, res) => {
+  const incoming = Array.isArray(req.body?.techStacks) ? req.body.techStacks : null;
+
+  if (!incoming) {
+    return res.status(400).json({
+      message: 'Expected body: { "techStacks": string[] }',
+    });
+  }
+
+  const cleaned = Array.from(
+    new Set(
+      incoming
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter(Boolean)
+    )
+  );
+
+  if (cleaned.length === 0) {
+    return res.status(400).json({
+      message: 'At least one tech stack must be provided.',
+    });
+  }
+
+  techStacks = cleaned;
+  writeTechStacksToFile(techStacks);
+
+  res.json({ techStacks });
 });
 
 app.get('/api/job', async (req, res) => {
@@ -115,21 +240,50 @@ app.get('/api/job', async (req, res) => {
       extractText($('meta[property="og:site_name"]').attr('content') || '') ||
       extractText($('[data-company-name]').first().text());
 
-    // Simple location logic:
-    // - If the page clearly mentions "remote", mark as Remote.
+    // Collect various text sources once so we can reuse them for both
+    // location and tech stack detection.
+    const pageText = $('body').text();
+    const metaDescription = $('meta[name="description"]').attr('content');
+    const ogDescription = $('meta[property="og:description"]').attr('content');
+
+    const scriptTextForRemote = $('script')
+      .map((_, element) => $(element).text() || '')
+      .get()
+      .join('\n');
+
+    const textForRemoteScan = [
+      pageText,
+      metaDescription,
+      ogDescription,
+      h1Title,
+      ogTitle,
+      pageTitle,
+      scriptTextForRemote,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    // Location logic:
+    // - If we see strong evidence of "remote" (including meta tags, title, or
+    //   JSON blobs in <script> tags) and no obvious "not remote" phrasing,
+    //   mark as Remote.
     // - Otherwise mark as "Not Remote" and append any obvious location hints.
-    const pageText = $('body').text().toLowerCase();
-    const hasRemoteWord = /\bremote\b/.test(pageText);
+    const hasPositiveRemote = /\bremote\b/i.test(textForRemoteScan);
+    const hasNegativeRemote = /\b(?:no|not|non)[-\s]?remote\b/i.test(textForRemoteScan);
     let location;
 
-    if (hasRemoteWord) {
+    if (hasPositiveRemote && !hasNegativeRemote) {
       location = 'Remote';
     } else {
       const hints = extractLocationHints($);
       location = hints.length > 0 ? `Not Remote\n${hints.join(' / ')}` : 'Not Remote';
     }
 
-    const techStacks = collectKeywords($);
+    // Feed an enriched text source (including meta descriptions) into the
+    // tech-stack collector so that JDs rendered via client-side frameworks
+    // still have a chance to be parsed.
+    const textForStacksScan = [pageText, metaDescription, ogDescription].filter(Boolean).join('\n');
+    const techStacks = collectKeywords($, textForStacksScan);
     const hostname = new URL(targetUrl).hostname.replace(/^www\./, '');
 
     const payload = {
