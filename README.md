@@ -48,3 +48,4 @@ Simple React + Node.js playground that grabs a fresh job post from the RemoteOK 
 
 Feel free to swap the data source or enrich the parser—everything is kept intentionally small and hackable.
 
+

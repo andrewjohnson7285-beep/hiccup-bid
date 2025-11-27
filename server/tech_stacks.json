@@ -2,7 +2,6 @@
   "React",
   "Next.js",
   "TypeScript",
-  "JavaScript",
   "Node.js",
   "Angular",
   "Vue.js",
@@ -11,5 +10,6 @@
   "Python",
   "Django",
   "Flask",
-  "AWS"
+  "AWS",
+  "JavaScript"
 ]

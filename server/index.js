@@ -118,9 +118,14 @@ const collectKeywords = ($, pageText = '') => {
     } else if (/^Node(?:\\.js)?$/i.test(normalized)) {
       patternSource = '\\bNode(?:\\.js|JS)?\\b';
     } else if (/^JavaScript$/i.test(normalized)) {
-      patternSource = '\\bJavaScript\\b|\\bJS\\b';
+      // Match "JavaScript" or standalone "JS" (not part of words like "NestJS")
+      // Exclude "text/javascript", "application/javascript"
+      // Exclude "enable JavaScript" (common browser warning)
+      // AND exclude .js, /js, 'js', "js" to avoid code artifacts in scripts/urls
+      patternSource = '(?<!(text|application)\\/|enable\\s)\\bJavaScript\\b|(?<![\\w./\'"-])JS(?![\\w])';
     } else if (/^TypeScript$/i.test(normalized)) {
-      patternSource = '\\bTypeScript\\b|\\bTS\\b';
+      // Match "TypeScript" or standalone "TS" (not part of other words)
+      patternSource = '\\bTypeScript\\b|(?<!\\w)TS(?!\\w)';
     } else if (/^AWS$/i.test(normalized)) {
       patternSource = '\\bAWS\\b|\\bAmazon Web Services\\b';
     }
